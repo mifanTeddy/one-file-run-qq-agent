@@ -165,6 +165,10 @@ BOT_QQ="YOUR_BOT_QQ"                         # 机器人QQ号
 
 唯一的要求是在所有副本中保留版权声明和许可证声明。
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=mifanTeddy/one-file-run-qq-agent&type=Date)](https://www.star-history.com/#mifanTeddy/one-file-run-qq-agent&Date)
+
 ## 贡献
 
 欢迎提交Issue和Pull Request，特别是：
@@ -172,6 +176,8 @@ BOT_QQ="YOUR_BOT_QQ"                         # 机器人QQ号
 - 性能优化
 - 功能增强
 - 文档改进
+
+如果这个项目对你有帮助，请考虑给个 ⭐ Star 支持一下！
 
 ---
 
