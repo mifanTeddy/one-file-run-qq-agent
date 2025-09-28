@@ -1,0 +1,838 @@
+' ===============================================
+' QQ机器人 Excel VBA 完整实现
+' ===============================================
+
+' ===== 模块1: HTTPHelper =====
+' 通用HTTP请求模块
+
+Option Explicit
+
+' 通用HTTP请求函数
+Public Function HttpRequest(url As String, method As String, Optional jsonData As String = "", Optional headers As Object = Nothing) As String
+    Dim http As Object
+    Set http = CreateObject("MSXML2.XMLHTTP")
+
+    On Error GoTo ErrorHandler
+
+    ' 配置请求
+    http.Open method, url, False
+    http.setTimeOut 30000 ' 30秒超时
+
+    ' 设置默认头部
+    If method = "POST" Then
+        http.setRequestHeader "Content-Type", "application/json"
+    End If
+
+    ' 设置自定义头部
+    If Not headers Is Nothing Then
+        Dim key As Variant
+        For Each key In headers.Keys
+            http.setRequestHeader CStr(key), CStr(headers(key))
+        Next key
+    End If
+
+    ' 发送请求
+    If jsonData <> "" Then
+        http.send jsonData
+    Else
+        http.send
+    End If
+
+    ' 检查响应状态
+    If http.Status = 200 Then
+        HttpRequest = http.responseText
+    Else
+        LogMessage "HTTP错误", "Status: " & http.Status & " - " & http.statusText
+        HttpRequest = ""
+    End If
+
+    Set http = Nothing
+    Exit Function
+
+ErrorHandler:
+    LogMessage "HTTP异常", Err.Description
+    HttpRequest = ""
+    Set http = Nothing
+End Function
+
+' 获取群消息
+Public Function GetMessages(napcatUrl As String, groupId As String) As String
+    Dim jsonData As String
+    jsonData = "{""group_id"": " & groupId & ", ""count"": 40}"
+    GetMessages = HttpRequest(napcatUrl & "/get_group_msg_history", "POST", jsonData)
+End Function
+
+' 发送群消息
+Public Function SendMessage(napcatUrl As String, groupId As String, message As String) As String
+    Dim jsonData As String
+    message = Replace(message, """", "\""") ' 转义引号
+    jsonData = "{""group_id"": " & groupId & ", ""message"": """ & message & """}"
+    SendMessage = HttpRequest(napcatUrl & "/send_group_msg", "POST", jsonData)
+End Function
+
+' 调用Gemini API
+Public Function CallGeminiAPI(apiUrl As String, apiKey As String, prompt As String) As String
+    Dim headers As Object
+    Set headers = CreateObject("Scripting.Dictionary")
+    headers.Add "x-goog-api-key", apiKey
+
+    Dim jsonData As String
+    jsonData = BuildGeminiPayload(prompt)
+
+    CallGeminiAPI = HttpRequest(apiUrl, "POST", jsonData, headers)
+End Function
+
+' ===== 模块2: JSONHelper =====
+' JSON解析和构建模块
+
+Option Explicit
+
+' 提取JSON字符串值（简单实现）
+Public Function GetJsonValue(jsonText As String, key As String) As String
+    Dim pattern As String
+    Dim startPos As Long, endPos As Long
+    Dim result As String
+
+    ' 查找 "key": "value" 或 "key": value 模式
+    pattern = """" & key & """:"
+    startPos = InStr(jsonText, pattern)
+
+    If startPos > 0 Then
+        startPos = startPos + Len(pattern)
+
+        ' 跳过空格
+        While Mid(jsonText, startPos, 1) = " " And startPos <= Len(jsonText)
+            startPos = startPos + 1
+        Wend
+
+        If Mid(jsonText, startPos, 1) = """" Then
+            ' 字符串值
+            startPos = startPos + 1
+            endPos = InStr(startPos, jsonText, """")
+            If endPos > startPos Then
+                result = Mid(jsonText, startPos, endPos - startPos)
+            End If
+        Else
+            ' 数值或其他
+            endPos = InStr(startPos, jsonText, ",")
+            If endPos = 0 Then endPos = InStr(startPos, jsonText, "}")
+            If endPos > startPos Then
+                result = Trim(Mid(jsonText, startPos, endPos - startPos))
+            End If
+        End If
+    End If
+
+    GetJsonValue = result
+End Function
+
+' 提取消息数组
+Public Function ParseMessages(jsonResponse As String) As Collection
+    Dim messages As New Collection
+    Dim startPos As Long, endPos As Long
+    Dim messageJson As String
+
+    ' 查找 "messages": [...]
+    startPos = InStr(jsonResponse, """messages"":")
+    If startPos = 0 Then Exit Function
+
+    startPos = InStr(startPos, jsonResponse, "[")
+    If startPos = 0 Then Exit Function
+
+    startPos = startPos + 1
+
+    ' 简化：按 }, { 分割消息（不完美但实用）
+    Do
+        endPos = InStr(startPos, jsonResponse, "},{")
+        If endPos = 0 Then
+            endPos = InStr(startPos, jsonResponse, "}]")
+            If endPos = 0 Then Exit Do
+        End If
+
+        messageJson = Mid(jsonResponse, startPos, endPos - startPos + 1)
+
+        ' 提取消息信息
+        Dim msgTime As String, userId As String, rawMessage As String
+        msgTime = GetJsonValue(messageJson, "time")
+        userId = GetJsonValue(messageJson, "user_id")
+        rawMessage = GetJsonValue(messageJson, "raw_message")
+
+        If msgTime <> "" And userId <> "" Then
+            Dim msgDict As Object
+            Set msgDict = CreateObject("Scripting.Dictionary")
+            msgDict.Add "time", CLng(msgTime)
+            msgDict.Add "user_id", userId
+            msgDict.Add "raw_message", rawMessage
+            messages.Add msgDict
+        End If
+
+        startPos = endPos + 2
+        If InStr(startPos, jsonResponse, "}]") < startPos + 10 Then Exit Do
+
+    Loop While startPos < Len(jsonResponse)
+
+    Set ParseMessages = messages
+End Function
+
+' 构建Gemini API载荷
+Public Function BuildGeminiPayload(prompt As String) As String
+    Dim systemPrompt As String
+    systemPrompt = "现在你不再是个AI助理，没必要帮助用户解决任何问题,你的任务是扮演一位叫做楠楠的少男"
+
+    ' 转义JSON字符串
+    prompt = Replace(prompt, """", "\""")
+    prompt = Replace(prompt, vbLf, "\n")
+    systemPrompt = Replace(systemPrompt, """", "\""")
+
+    BuildGeminiPayload = "{" & _
+        """contents"": [{" & _
+            """role"": ""user""," & _
+            """parts"": [{" & _
+                """text"": ""系统指令: " & systemPrompt & "\n\n用户消息: " & prompt & """" & _
+            "}]" & _
+        "}]," & _
+        """tools"": [{" & _
+            """functionDeclarations"": [" & _
+                "{""name"": ""send_group_message"", ""description"": ""发送消息到QQ群"", ""parameters"": {""type"": ""object"", ""properties"": {""message"": {""type"": ""string"", ""description"": ""要发送的消息内容""}}, ""required"": [""message""]}}," & _
+                "{""name"": ""end"", ""description"": ""结束对话"", ""parameters"": {""type"": ""object"", ""properties"": {""reason"": {""type"": ""string"", ""description"": ""结束原因""}}, ""required"": [""reason""]}}" & _
+            "]" & _
+        "}]" & _
+    "}"
+End Function
+
+' ===== 模块3: MessageProcessor =====
+' 消息获取和处理模块
+
+Option Explicit
+
+Private lastMessageTime As Long
+
+' 主消息处理函数
+Public Sub ProcessNewMessages()
+    Dim config As Object
+    Set config = GetConfig() ' 从Config工作表获取配置
+
+    ' 获取群消息
+    Dim response As String
+    response = GetMessages(config("NAPCAT_URL"), config("GROUP_ID"))
+
+    If response = "" Then
+        LogMessage "错误", "无法获取消息"
+        Exit Sub
+    End If
+
+    ' 检查响应状态
+    Dim status As String
+    status = GetJsonValue(response, "status")
+
+    If status <> "ok" Then
+        LogMessage "错误", "API返回状态: " & status
+        Exit Sub
+    End If
+
+    ' 解析消息
+    Dim messages As Collection
+    Set messages = ParseMessages(response)
+
+    If messages.Count = 0 Then Exit Sub
+
+    ' 检测新消息
+    Dim newMessages As Collection
+    Set newMessages = DetectNewMessages(messages, config("BOT_QQ"))
+
+    If newMessages.Count > 0 Then
+        ' 格式化消息历史
+        Dim chatHistory As String
+        chatHistory = FormatMessageHistory(messages, config("BOT_QQ"))
+
+        ' 格式化新消息
+        Dim newMessageText As String
+        newMessageText = FormatNewMessages(newMessages)
+
+        ' 构建AI提示词
+        Dim prompt As String
+        prompt = BuildPrompt(chatHistory, newMessageText, config)
+
+        LogMessage "处理", "检测到 " & newMessages.Count & " 条新消息"
+
+        ' 调用AI处理
+        CallAIForProcessing prompt, config
+    End If
+End Sub
+
+' 检测新消息
+Private Function DetectNewMessages(messages As Collection, botQQ As String) As Collection
+    Dim newMessages As New Collection
+    Dim msg As Object
+    Dim msgTime As Long
+
+    For Each msg In messages
+        msgTime = CLng(msg("time"))
+
+        ' 过滤机器人自己的消息和旧消息
+        If msg("user_id") <> botQQ And msgTime > lastMessageTime Then
+            newMessages.Add msg
+
+            ' 更新最新消息时间
+            If msgTime > lastMessageTime Then
+                lastMessageTime = msgTime
+                ' 保存到配置
+                SaveLastMessageTime msgTime
+            End If
+        End If
+    Next msg
+
+    Set DetectNewMessages = newMessages
+End Function
+
+' 格式化消息历史
+Private Function FormatMessageHistory(messages As Collection, botQQ As String) As String
+    Dim result As String
+    Dim msg As Object
+    Dim timeStr As String, tag As String
+
+    For Each msg In messages
+        timeStr = Format(DateAdd("s", CLng(msg("time")) - CLng(msg("time")) \ 86400 * 86400, "00:00:00"), "hh:mm:ss")
+
+        tag = ""
+        If msg("user_id") = botQQ Then
+            tag = "[我自己]"
+        End If
+
+        result = result & "[" & timeStr & "] 用户" & msg("user_id") & tag & ": " & msg("raw_message") & vbLf
+    Next msg
+
+    FormatMessageHistory = result
+End Function
+
+' 格式化新消息
+Private Function FormatNewMessages(newMessages As Collection) As String
+    Dim result As String
+    Dim msg As Object
+    Dim timeStr As String
+
+    For Each msg In newMessages
+        timeStr = Format(DateAdd("s", CLng(msg("time")) - CLng(msg("time")) \ 86400 * 86400, "00:00:00"), "hh:mm:ss")
+        result = result & "[" & timeStr & "] 用户" & msg("user_id") & ": " & msg("raw_message") & vbLf
+
+        LogMessage "新消息", msg("raw_message")
+    Next msg
+
+    FormatNewMessages = result
+End Function
+
+' 构建AI提示词
+Private Function BuildPrompt(chatHistory As String, newMessages As String, config As Object) As String
+    Dim currentTime As String
+    currentTime = Format(Now, "yyyy-mm-dd hh:mm:ss")
+
+    BuildPrompt = "当前时间: " & currentTime & vbLf & _
+        "群聊ID: " & config("GROUP_ID") & vbLf & _
+        "我的QQ号: " & config("BOT_QQ") & vbLf & vbLf & _
+        "💬 群聊历史记录:" & vbLf & _
+        chatHistory & vbLf & _
+        "------ 以下是新消息 ------" & vbLf & _
+        newMessages & _
+        "------ 以上是所有新消息内容 ------" & vbLf & vbLf & _
+        "🧠 请仔细分析当前对话状态，然后决定下一步操作:" & vbLf & vbLf & _
+        "1. 参与判断 - 是否需要回复:" & vbLf & _
+        "   - 消息是否与我相关或值得参与？" & vbLf & _
+        "   - 如果话题无聊且无法开涮群友，直接调用end工具" & vbLf & _
+        "   - 如果值得吐槽或有趣，用send_group_message简短回复" & vbLf & vbLf & _
+        "2. 回复风格:" & vbLf & _
+        "   - 简洁回复，尽量20字以内" & vbLf & _
+        "   - 多用吐槽，少用解释" & vbLf & _
+        "   - 像真实的23岁网友一样说话" & vbLf & vbLf & _
+        "记住：绝不直接返回文本，必须使用send_group_message或end工具！"
+End Function
+
+' 初始化（从配置加载最后消息时间）
+Public Sub InitializeLastMessageTime()
+    lastMessageTime = GetConfigValue("LAST_MESSAGE_TIME", 0)
+End Sub
+
+' 保存最后消息时间
+Private Sub SaveLastMessageTime(msgTime As Long)
+    SaveConfigValue "LAST_MESSAGE_TIME", msgTime
+End Sub
+
+' ===== 模块4: AIProcessor =====
+' AI调用和响应解析模块
+
+Option Explicit
+
+' 调用AI处理消息
+Public Sub CallAIForProcessing(prompt As String, config As Object)
+    LogMessage "AI调用", "正在处理新消息..."
+
+    ' 调用Gemini API
+    Dim response As String
+    response = CallGeminiAPI(config("GEMINI_API_URL"), config("GEMINI_API_KEY"), prompt)
+
+    If response <> "" Then
+        ' 解析并执行AI响应
+        Dim shouldContinue As Boolean
+        shouldContinue = ExecuteAIResponse(response, config)
+
+        If Not shouldContinue Then
+            LogMessage "AI决定", "结束对话"
+        End If
+    Else
+        LogMessage "错误", "AI调用失败"
+    End If
+End Sub
+
+' 执行AI响应
+Private Function ExecuteAIResponse(response As String, config As Object) As Boolean
+    ExecuteAIResponse = True ' 默认继续
+
+    ' 解析candidates数组
+    Dim partsStartPos As Long, partsEndPos As Long
+    partsStartPos = InStr(response, """parts"":")
+    If partsStartPos = 0 Then Exit Function
+
+    partsStartPos = InStr(partsStartPos, response, "[")
+    If partsStartPos = 0 Then Exit Function
+
+    partsEndPos = FindMatchingBracket(response, partsStartPos, "[", "]")
+    If partsEndPos = 0 Then Exit Function
+
+    Dim partsJson As String
+    partsJson = Mid(response, partsStartPos, partsEndPos - partsStartPos + 1)
+
+    ' 处理每个part
+    Dim hasEndCall As Boolean
+    hasEndCall = ProcessResponseParts(partsJson, config)
+
+    If hasEndCall Then
+        ExecuteAIResponse = False
+    End If
+End Function
+
+' 处理响应parts
+Private Function ProcessResponseParts(partsJson As String, config As Object) As Boolean
+    Dim hasEndCall As Boolean
+    hasEndCall = False
+
+    ' 简化处理：查找所有functionCall
+    Dim pos As Long
+    pos = 1
+
+    Do
+        Dim functionCallPos As Long
+        functionCallPos = InStr(pos, partsJson, """functionCall"":")
+
+        If functionCallPos = 0 Then
+            ' 检查是否有text内容
+            Dim textPos As Long
+            textPos = InStr(pos, partsJson, """text"":")
+            If textPos > 0 Then
+                Dim textContent As String
+                textContent = ExtractTextContent(partsJson, textPos)
+                If textContent <> "" Then
+                    LogMessage "AI文本", textContent
+                    SendMessage config("NAPCAT_URL"), config("GROUP_ID"), textContent
+                End If
+            End If
+            Exit Do
+        End If
+
+        ' 提取函数调用
+        Dim functionName As String, functionArgs As String
+        functionName = ExtractFunctionName(partsJson, functionCallPos)
+        functionArgs = ExtractFunctionArgs(partsJson, functionCallPos)
+
+        Select Case functionName
+            Case "send_group_message"
+                Dim message As String
+                message = GetJsonValue(functionArgs, "message")
+                If message <> "" Then
+                    LogMessage "发送消息", message
+                    SendMessage config("NAPCAT_URL"), config("GROUP_ID"), message
+                End If
+
+            Case "end"
+                Dim reason As String
+                reason = GetJsonValue(functionArgs, "reason")
+                If reason = "" Then reason = "完成"
+                LogMessage "结束对话", reason
+                hasEndCall = True
+        End Select
+
+        pos = functionCallPos + 1
+    Loop While pos < Len(partsJson)
+
+    ProcessResponseParts = hasEndCall
+End Function
+
+' 提取函数名
+Private Function ExtractFunctionName(json As String, startPos As Long) As String
+    Dim namePos As Long
+    namePos = InStr(startPos, json, """name"":")
+    If namePos > 0 Then
+        ExtractFunctionName = GetJsonValue(Mid(json, namePos - 10), "name")
+    End If
+End Function
+
+' 提取函数参数
+Private Function ExtractFunctionArgs(json As String, startPos As Long) As String
+    Dim argsPos As Long
+    argsPos = InStr(startPos, json, """args"":")
+    If argsPos > 0 Then
+        ' 查找args对象的开始和结束
+        Dim objStart As Long, objEnd As Long
+        objStart = InStr(argsPos, json, "{")
+        If objStart > 0 Then
+            objEnd = FindMatchingBracket(json, objStart, "{", "}")
+            If objEnd > objStart Then
+                ExtractFunctionArgs = Mid(json, objStart, objEnd - objStart + 1)
+            End If
+        End If
+    End If
+End Function
+
+' 提取文本内容
+Private Function ExtractTextContent(json As String, startPos As Long) As String
+    ExtractTextContent = GetJsonValue(Mid(json, startPos - 10), "text")
+End Function
+
+' 查找匹配的括号
+Private Function FindMatchingBracket(text As String, startPos As Long, openChar As String, closeChar As String) As Long
+    Dim pos As Long, level As Long
+    level = 1
+    pos = startPos + 1
+
+    Do While pos <= Len(text) And level > 0
+        If Mid(text, pos, 1) = openChar Then
+            level = level + 1
+        ElseIf Mid(text, pos, 1) = closeChar Then
+            level = level - 1
+        End If
+        pos = pos + 1
+    Loop
+
+    If level = 0 Then
+        FindMatchingBracket = pos - 1
+    Else
+        FindMatchingBracket = 0
+    End If
+End Function
+
+' ===== 模块5: BotController =====
+' 定时循环控制模块
+
+Option Explicit
+
+Private botRunning As Boolean
+Private nextScheduledTime As Date
+
+' 启动机器人
+Public Sub StartBot()
+    If botRunning Then
+        LogMessage "状态", "机器人已经在运行中"
+        Exit Sub
+    End If
+
+    botRunning = True
+    InitializeLastMessageTime ' 初始化消息时间戳
+
+    LogMessage "启动", "QQ机器人启动"
+    UpdateBotStatus "运行中"
+
+    ' 立即执行第一次
+    BotMainLoop
+End Sub
+
+' 停止机器人
+Public Sub StopBot()
+    If Not botRunning Then
+        LogMessage "状态", "机器人已经停止"
+        Exit Sub
+    End If
+
+    botRunning = False
+
+    ' 取消定时任务
+    On Error Resume Next
+    Application.OnTime nextScheduledTime, "BotMainLoop", , False
+    On Error GoTo 0
+
+    LogMessage "停止", "QQ机器人已停止"
+    UpdateBotStatus "已停止"
+End Sub
+
+' 主循环函数
+Public Sub BotMainLoop()
+    ' 检查运行状态
+    If Not botRunning Then Exit Sub
+
+    On Error GoTo ErrorHandler
+
+    ' 处理消息
+    ProcessNewMessages
+
+    ' 调度下次执行（5秒后）
+    If botRunning Then
+        nextScheduledTime = Now + TimeValue("00:00:05")
+        Application.OnTime nextScheduledTime, "BotMainLoop"
+    End If
+
+    Exit Sub
+
+ErrorHandler:
+    LogMessage "错误", "主循环异常: " & Err.Description
+
+    ' 如果出错，等待更长时间后重试（10秒）
+    If botRunning Then
+        nextScheduledTime = Now + TimeValue("00:00:10")
+        Application.OnTime nextScheduledTime, "BotMainLoop"
+    End If
+End Sub
+
+' 获取机器人状态
+Public Function IsBotRunning() As Boolean
+    IsBotRunning = botRunning
+End Function
+
+' 更新状态显示
+Private Sub UpdateBotStatus(status As String)
+    On Error Resume Next
+    Worksheets("Config").Range("C8").Value = status
+    Worksheets("Config").Range("C8").Interior.Color = IIf(botRunning, RGB(144, 238, 144), RGB(255, 182, 193))
+    On Error GoTo 0
+End Sub
+
+' 强制停止（紧急用）
+Public Sub ForceStopBot()
+    botRunning = False
+    On Error Resume Next
+    Application.OnTime nextScheduledTime, "BotMainLoop", , False
+    On Error GoTo 0
+    LogMessage "紧急停止", "强制停止机器人"
+    UpdateBotStatus "强制停止"
+End Sub
+
+' 重启机器人
+Public Sub RestartBot()
+    StopBot
+    Application.Wait Now + TimeValue("00:00:02") ' 等待2秒
+    StartBot
+End Sub
+
+' ===== 模块6: ConfigManager =====
+' 配置和日志管理模块
+
+Option Explicit
+
+' 获取所有配置
+Public Function GetConfig() As Object
+    Dim config As Object
+    Set config = CreateObject("Scripting.Dictionary")
+
+    Dim ws As Worksheet
+    Set ws = Worksheets("Config")
+
+    config.Add "NAPCAT_URL", ws.Range("B2").Value
+    config.Add "GEMINI_API_KEY", ws.Range("B3").Value
+    config.Add "GEMINI_API_URL", ws.Range("B7").Value
+    config.Add "GROUP_ID", ws.Range("B4").Value
+    config.Add "BOT_QQ", ws.Range("B5").Value
+    config.Add "POLL_INTERVAL", ws.Range("B6").Value
+
+    Set GetConfig = config
+End Function
+
+' 获取单个配置值
+Public Function GetConfigValue(key As String, defaultValue As Variant) As Variant
+    Dim ws As Worksheet
+    Set ws = Worksheets("Config")
+
+    Select Case key
+        Case "NAPCAT_URL": GetConfigValue = ws.Range("B2").Value
+        Case "GEMINI_API_KEY": GetConfigValue = ws.Range("B3").Value
+        Case "GROUP_ID": GetConfigValue = ws.Range("B4").Value
+        Case "BOT_QQ": GetConfigValue = ws.Range("B5").Value
+        Case "POLL_INTERVAL": GetConfigValue = ws.Range("B6").Value
+        Case "GEMINI_API_URL": GetConfigValue = ws.Range("B7").Value
+        Case "LAST_MESSAGE_TIME": GetConfigValue = ws.Range("B8").Value
+        Case Else: GetConfigValue = defaultValue
+    End Select
+
+    If IsEmpty(GetConfigValue) Then GetConfigValue = defaultValue
+End Function
+
+' 保存配置值
+Public Sub SaveConfigValue(key As String, value As Variant)
+    Dim ws As Worksheet
+    Set ws = Worksheets("Config")
+
+    Select Case key
+        Case "LAST_MESSAGE_TIME": ws.Range("B8").Value = value
+    End Select
+End Sub
+
+' 日志记录
+Public Sub LogMessage(eventType As String, message As String)
+    Dim ws As Worksheet
+    Set ws = Worksheets("Log")
+
+    ' 找到第一个空行
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row + 1
+
+    ' 记录日志
+    ws.Cells(lastRow, 1).Value = Now
+    ws.Cells(lastRow, 2).Value = eventType
+    ws.Cells(lastRow, 3).Value = message
+
+    ' 自动滚动到最新日志
+    ws.Cells(lastRow, 1).Select
+
+    ' 限制日志行数（保持最新1000行）
+    If lastRow > 1000 Then
+        ws.Rows("2:500").Delete
+    End If
+End Sub
+
+' ===== 模块7: ThisWorkbook =====
+' 工作簿初始化模块
+
+Option Explicit
+
+Private Sub Workbook_Open()
+    ' 初始化工作表
+    Call InitializeWorksheets
+
+    ' 显示欢迎信息
+    LogMessage "系统", "QQ机器人Excel版本已加载"
+End Sub
+
+Private Sub Workbook_BeforeClose(Cancel As Boolean)
+    ' 确保机器人停止
+    If IsBotRunning() Then
+        StopBot
+    End If
+End Sub
+
+' 初始化所有工作表
+Public Sub InitializeWorksheets()
+    ' 确保工作表存在
+    Call EnsureWorksheetExists("Config")
+    Call EnsureWorksheetExists("Log")
+    Call EnsureWorksheetExists("Messages")
+
+    ' 设置工作表
+    Call SetupConfigWorksheet
+    Call SetupLogWorksheet
+    Call SetupMessagesWorksheet
+End Sub
+
+Private Sub EnsureWorksheetExists(sheetName As String)
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = Worksheets(sheetName)
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        Set ws = Worksheets.Add
+        ws.Name = sheetName
+    End If
+End Sub
+
+Private Sub SetupConfigWorksheet()
+    Dim ws As Worksheet
+    Set ws = Worksheets("Config")
+
+    With ws
+        .Cells.Clear
+
+        ' 设置配置项
+        .Range("A1").Value = "配置项"
+        .Range("B1").Value = "值"
+        .Range("A2").Value = "NAPCAT_URL"
+        .Range("B2").Value = "http://localhost:3000"
+        .Range("A3").Value = "GEMINI_API_KEY"
+        .Range("B3").Value = ""
+        .Range("A4").Value = "GROUP_ID"
+        .Range("B4").Value = ""
+        .Range("A5").Value = "BOT_QQ"
+        .Range("B5").Value = ""
+        .Range("A6").Value = "POLL_INTERVAL"
+        .Range("B6").Value = "5"
+        .Range("A7").Value = "GEMINI_API_URL"
+        .Range("B7").Value = ""
+        .Range("A8").Value = "LAST_MESSAGE_TIME"
+        .Range("B8").Value = "0"
+
+        ' 添加控制面板
+        .Range("A10").Value = "控制面板:"
+        .Range("C8").Value = "状态: 已停止"
+
+        ' 格式化
+        .Range("A1:B1").Font.Bold = True
+        .Range("A1:B1").Interior.Color = RGB(200, 200, 255)
+        .Columns("A:A").ColumnWidth = 20
+        .Columns("B:B").ColumnWidth = 50
+        .Columns("C:C").ColumnWidth = 15
+    End With
+End Sub
+
+Private Sub SetupLogWorksheet()
+    Dim ws As Worksheet
+    Set ws = Worksheets("Log")
+
+    With ws
+        .Cells.Clear
+        .Range("A1").Value = "时间"
+        .Range("B1").Value = "事件类型"
+        .Range("C1").Value = "详细信息"
+
+        ' 格式化表头
+        .Range("A1:C1").Font.Bold = True
+        .Range("A1:C1").Interior.Color = RGB(200, 255, 200)
+        .Columns("A:A").ColumnWidth = 20
+        .Columns("B:B").ColumnWidth = 15
+        .Columns("C:C").ColumnWidth = 60
+    End With
+End Sub
+
+Private Sub SetupMessagesWorksheet()
+    Dim ws As Worksheet
+    Set ws = Worksheets("Messages")
+
+    With ws
+        .Cells.Clear
+        .Range("A1").Value = "时间戳"
+        .Range("B1").Value = "用户ID"
+        .Range("C1").Value = "消息内容"
+        .Range("D1").Value = "AI响应"
+
+        ' 格式化表头
+        .Range("A1:D1").Font.Bold = True
+        .Range("A1:D1").Interior.Color = RGB(255, 255, 200)
+        .Columns("A:A").ColumnWidth = 20
+        .Columns("B:B").ColumnWidth = 15
+        .Columns("C:C").ColumnWidth = 40
+        .Columns("D:D").ColumnWidth = 40
+    End With
+End Sub
+
+' ===== 使用说明 =====
+'
+' 1. 创建新Excel文件，另存为 .xlsm 格式
+' 2. Alt+F11 打开VBA编辑器
+' 3. 分别创建以上7个模块，复制对应代码
+' 4. 在Config工作表添加3个按钮：
+'    - 启动按钮：指定宏 StartBot
+'    - 停止按钮：指定宏 StopBot
+'    - 重启按钮：指定宏 RestartBot
+' 5. 修改Config工作表中的API密钥和QQ配置
+' 6. 确保NapCat运行在localhost:3000
+' 7. 点击启动按钮开始运行
+'
+' 功能特性：
+' - 完全复制shell脚本功能
+' - 图形化界面和实时日志
+' - 非阻塞运行，Excel仍可正常使用
+' - 配置热更新，无需重启
+' - 更好的错误处理和状态显示
+'
